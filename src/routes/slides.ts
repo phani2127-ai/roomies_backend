@@ -1,9 +1,13 @@
 import { Router } from "express";
-import { put, del } from "@vercel/blob";
 import { db } from "../db.js";
 import { asyncHandler } from "../asyncHandler.js";
 
 const router = Router();
+
+// Slide photos are stored as base64 data URIs directly in the DB -- no
+// external blob storage to configure. Cap well under the 10mb JSON body
+// limit so a single oversized upload can't blow past it.
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 router.get(
   "/",
@@ -26,18 +30,17 @@ router.post(
       return res.status(400).json({ error: "Invalid base64 image format" });
     }
 
-    const ext = matches[1].split("/")[1] || "png";
     const buffer = Buffer.from(matches[2], "base64");
-    const filename = `slide-${Date.now()}.${ext}`;
-
-    const blob = await put(filename, buffer, { access: "public" });
+    if (buffer.byteLength > MAX_IMAGE_BYTES) {
+      return res.status(400).json({ error: "Image is too large (max 4MB)" });
+    }
 
     const insert = await db.execute({
       sql: "INSERT INTO slides (url) VALUES (?)",
-      args: [blob.url],
+      args: [image],
     });
 
-    res.status(201).json({ id: Number(insert.lastInsertRowid), url: blob.url });
+    res.status(201).json({ id: Number(insert.lastInsertRowid), url: image });
   }),
 );
 
@@ -45,25 +48,12 @@ router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     const result = await db.execute({
-      sql: "SELECT url FROM slides WHERE id = ?",
-      args: [req.params.id],
-    });
-    const row = result.rows[0];
-    if (!row) {
-      return res.status(404).json({ error: "Slide not found" });
-    }
-
-    try {
-      await del(row.url as string);
-    } catch (err) {
-      console.error("Error deleting blob:", err);
-    }
-
-    await db.execute({
       sql: "DELETE FROM slides WHERE id = ?",
       args: [req.params.id],
     });
-
+    if (result.rowsAffected === 0) {
+      return res.status(404).json({ error: "Slide not found" });
+    }
     res.json({ message: "Slide deleted successfully" });
   }),
 );

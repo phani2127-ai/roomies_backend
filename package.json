@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@libsql/client": "^0.15.15",
-    "@vercel/blob": "^1.1.1",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "razorpay": "^2.9.6"
