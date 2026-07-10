@@ -36,6 +36,19 @@ await db.execute(
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency_key ON bookings(idempotency_key)"
 );
 
+// Additive migration for databases created before booking_code existed --
+// ALTER TABLE ADD COLUMN has no "IF NOT EXISTS" in SQLite, so ignore the
+// "duplicate column" error on a re-run.
+try {
+  await db.execute("ALTER TABLE bookings ADD COLUMN booking_code TEXT");
+} catch (err) {
+  if (!String(err).includes("duplicate column")) throw err;
+}
+
+await db.execute(
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_booking_code ON bookings(booking_code)"
+);
+
 await db.execute(`
   CREATE TABLE IF NOT EXISTS slides (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

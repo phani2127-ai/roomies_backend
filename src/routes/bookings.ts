@@ -14,6 +14,12 @@ function expandHours(startHour: unknown, duration: unknown) {
   return hours;
 }
 
+// Customer-facing "Booking ID" -- a random 6-digit code, distinct from the
+// internal auto-increment `id` used for every other API call.
+function generateBookingCode(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
 router.get(
   "/",
   asyncHandler(async (req, res) => {
@@ -61,11 +67,13 @@ router.post(
     // etc.) -- return the original result instead of re-checking overlap.
     if (idempotencyKey) {
       const dup = await db.execute({
-        sql: "SELECT id FROM bookings WHERE idempotency_key = ?",
+        sql: "SELECT id, booking_code FROM bookings WHERE idempotency_key = ?",
         args: [idempotencyKey],
       });
       if (dup.rows[0]) {
-        return res.status(201).json({ message: "Booking created successfully", id: Number(dup.rows[0].id) });
+        return res
+          .status(201)
+          .json({ message: "Booking created successfully", id: Number(dup.rows[0].id), booking_code: dup.rows[0].booking_code });
       }
     }
 
@@ -83,46 +91,63 @@ router.post(
       return res.status(409).json({ error: "Time slot is already reserved." });
     }
 
-    try {
-      const insert = await db.execute({
-        sql: `
-          INSERT INTO bookings (name, phone, email, guests, date, time_range, duration, start_hour, occasion, notes, services, payment_status, payment_method, total_price, idempotency_key)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        args: [
-          name,
-          phone ?? null,
-          email ?? null,
-          guests ?? null,
-          date,
-          time_range ?? null,
-          duration,
-          start_hour,
-          occasion ?? null,
-          notes ?? null,
-          services ?? null,
-          payment_status || "pending",
-          payment_method ?? null,
-          total_price || 0,
-          idempotencyKey ?? null,
-        ],
-      });
-
-      res.status(201).json({ message: "Booking created successfully", id: Number(insert.lastInsertRowid) });
-    } catch (err) {
-      // Two requests with the same key raced past the check above -- the
-      // unique index caught it. Look up and return the winner's result.
-      if (idempotencyKey && String(err).includes("UNIQUE")) {
-        const dup = await db.execute({
-          sql: "SELECT id FROM bookings WHERE idempotency_key = ?",
-          args: [idempotencyKey],
+    // Collisions on a random 6-digit code are rare but possible -- the
+    // unique index catches them, so just try again with a fresh code.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const bookingCode = generateBookingCode();
+      try {
+        const insert = await db.execute({
+          sql: `
+            INSERT INTO bookings (name, phone, email, guests, date, time_range, duration, start_hour, occasion, notes, services, payment_status, payment_method, total_price, idempotency_key, booking_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          args: [
+            name,
+            phone ?? null,
+            email ?? null,
+            guests ?? null,
+            date,
+            time_range ?? null,
+            duration,
+            start_hour,
+            occasion ?? null,
+            notes ?? null,
+            services ?? null,
+            payment_status || "pending",
+            payment_method ?? null,
+            total_price || 0,
+            idempotencyKey ?? null,
+            bookingCode,
+          ],
         });
-        if (dup.rows[0]) {
-          return res.status(201).json({ message: "Booking created successfully", id: Number(dup.rows[0].id) });
+
+        return res
+          .status(201)
+          .json({ message: "Booking created successfully", id: Number(insert.lastInsertRowid), booking_code: bookingCode });
+      } catch (err) {
+        if (String(err).includes("UNIQUE") && String(err).includes("booking_code")) {
+          continue; // code collision -- retry with a new one
         }
+        // Two requests with the same key raced past the check above -- the
+        // unique index caught it. Look up and return the winner's result.
+        if (idempotencyKey && String(err).includes("UNIQUE")) {
+          const dup = await db.execute({
+            sql: "SELECT id, booking_code FROM bookings WHERE idempotency_key = ?",
+            args: [idempotencyKey],
+          });
+          if (dup.rows[0]) {
+            return res.status(201).json({
+              message: "Booking created successfully",
+              id: Number(dup.rows[0].id),
+              booking_code: dup.rows[0].booking_code,
+            });
+          }
+        }
+        throw err;
       }
-      throw err;
     }
+
+    throw new Error("Could not generate a unique booking code after 5 attempts");
   }),
 );
 
