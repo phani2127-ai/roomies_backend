@@ -20,6 +20,16 @@ function generateBookingCode(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
+// A slot only stays "held" while it's actually paid for, or briefly while a
+// checkout is in progress. A cancelled booking never holds its slot; a
+// pending one (created the moment the booking form is submitted, before
+// Razorpay checkout even opens) only holds it for a short grace window --
+// otherwise someone who abandons checkout would block that slot forever.
+const ACTIVE_BOOKING_FILTER = `(
+  payment_status IN ('paid', 'advance_paid')
+  OR (payment_status = 'pending' AND created_at > datetime('now', '-15 minutes'))
+)`;
+
 router.get(
   "/",
   asyncHandler(async (req, res) => {
@@ -29,7 +39,7 @@ router.get(
     }
 
     const result = await db.execute({
-      sql: "SELECT start_hour, duration FROM bookings WHERE date = ?",
+      sql: `SELECT start_hour, duration FROM bookings WHERE date = ? AND ${ACTIVE_BOOKING_FILTER}`,
       args: [date],
     });
 
@@ -78,7 +88,7 @@ router.post(
     }
 
     const existing = await db.execute({
-      sql: "SELECT start_hour, duration FROM bookings WHERE date = ?",
+      sql: `SELECT start_hour, duration FROM bookings WHERE date = ? AND ${ACTIVE_BOOKING_FILTER}`,
       args: [date],
     });
 
